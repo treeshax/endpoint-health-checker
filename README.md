@@ -287,7 +287,7 @@ monitor.start();
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `defaultIntervalMs` | `number` | `30000` | Default interval between checks in milliseconds |
-| `timeoutMs` | `number` | `5000` | Default request timeout threshold in milliseconds |
+| `defaultTimeoutMs` | `number` | `5000` | Default request timeout threshold in ms (also accepts `timeoutMs`) |
 | `maxLatencyMs` | `number` | `undefined` | Optional global threshold for `DEGRADED` status |
 | `maxHistorySize` | `number` | `50` | Maximum number of historical records to keep per endpoint |
 

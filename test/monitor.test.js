@@ -1,7 +1,15 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { EndpointMonitor, EndpointChecker, HealthStatus } from '../src/index.js';
+import DefaultEndpointMonitor, {
+  EndpointMonitor,
+  EndpointChecker,
+  HealthStatus,
+  probeEndpoint,
+  evaluateHealth,
+  Scheduler,
+  EndpointTracker
+} from '../src/index.js';
 
 describe('Monitoring Manager & Public API (src/monitor.js)', () => {
   let server;
@@ -38,6 +46,51 @@ describe('Monitoring Manager & Public API (src/monitor.js)', () => {
     assert.equal(EndpointChecker, EndpointMonitor);
     const monitor = new EndpointChecker();
     assert.ok(monitor instanceof EndpointMonitor);
+  });
+
+  test('1b. Default and named exports are properly exposed from package entry point', () => {
+    assert.equal(DefaultEndpointMonitor, EndpointMonitor);
+    assert.equal(typeof DefaultEndpointMonitor, 'function');
+    assert.equal(typeof EndpointChecker, 'function');
+    assert.equal(typeof probeEndpoint, 'function');
+    assert.equal(typeof evaluateHealth, 'function');
+    assert.equal(typeof Scheduler, 'function');
+    assert.equal(typeof EndpointTracker, 'function');
+    assert.ok(HealthStatus);
+    assert.equal(HealthStatus.UP, 'UP');
+
+    const defaultInst = new DefaultEndpointMonitor();
+    assert.ok(defaultInst instanceof EndpointMonitor);
+  });
+
+  test('1c. Supports defaultTimeoutMs, timeoutMs, and precedence when both are supplied', () => {
+    // 1. defaultTimeoutMs
+    const monitor1 = new EndpointMonitor({ defaultTimeoutMs: 3500 });
+    assert.equal(monitor1.defaultTimeoutMs, 3500);
+    assert.equal(monitor1.timeoutMs, 3500);
+    monitor1.addEndpoint({ id: 't1', url: `${baseUrl}/api/health` });
+    assert.equal(monitor1.endpoints.get('t1').timeoutMs, 3500);
+
+    // 2. timeoutMs alias
+    const monitor2 = new EndpointMonitor({ timeoutMs: 4200 });
+    assert.equal(monitor2.defaultTimeoutMs, 4200);
+    assert.equal(monitor2.timeoutMs, 4200);
+    monitor2.addEndpoint({ id: 't2', url: `${baseUrl}/api/health` });
+    assert.equal(monitor2.endpoints.get('t2').timeoutMs, 4200);
+
+    // 3. Precedence: defaultTimeoutMs overrides timeoutMs when both are supplied
+    const monitor3 = new EndpointMonitor({ defaultTimeoutMs: 1200, timeoutMs: 9999 });
+    assert.equal(monitor3.defaultTimeoutMs, 1200);
+    assert.equal(monitor3.timeoutMs, 1200);
+    monitor3.addEndpoint({ id: 't3', url: `${baseUrl}/api/health` });
+    assert.equal(monitor3.endpoints.get('t3').timeoutMs, 1200);
+
+    // 4. Endpoint-level timeout configurations
+    monitor3.addEndpoint({ id: 't4', url: `${baseUrl}/api/health`, defaultTimeoutMs: 2500 });
+    assert.equal(monitor3.endpoints.get('t4').timeoutMs, 2500);
+
+    monitor3.addEndpoint({ id: 't5', url: `${baseUrl}/api/health`, timeoutMs: 1800, defaultTimeoutMs: 3000 });
+    assert.equal(monitor3.endpoints.get('t5').timeoutMs, 1800);
   });
 
   test('2. Validates endpoint registration and prevents duplicates', () => {

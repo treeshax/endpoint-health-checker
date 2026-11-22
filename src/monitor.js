@@ -22,6 +22,7 @@ function validateEndpointConfig(config) {
     headers = {},
     body,
     timeoutMs,
+    defaultTimeoutMs,
     intervalMs,
     expectedStatus,
     maxLatencyMs,
@@ -93,9 +94,10 @@ function validateEndpointConfig(config) {
     }
   }
 
+  const rawEndpointTimeout = timeoutMs ?? defaultTimeoutMs;
   let parsedTimeoutMs;
-  if (timeoutMs !== undefined && timeoutMs !== null) {
-    parsedTimeoutMs = Number(timeoutMs);
+  if (rawEndpointTimeout !== undefined && rawEndpointTimeout !== null) {
+    parsedTimeoutMs = Number(rawEndpointTimeout);
     if (!Number.isFinite(parsedTimeoutMs) || parsedTimeoutMs <= 0) {
       throw new RangeError('Endpoint "timeoutMs" must be a positive number');
     }
@@ -166,7 +168,8 @@ export class EndpointMonitor extends EventEmitter {
   /**
    * @param {Object} [globalConfig={}] Global defaults
    * @param {number} [globalConfig.defaultIntervalMs=30000] Default check interval in ms
-   * @param {number} [globalConfig.timeoutMs=5000] Default request timeout in ms
+   * @param {number} [globalConfig.defaultTimeoutMs=5000] Default request timeout in ms
+   * @param {number} [globalConfig.timeoutMs=5000] Backwards-compatible alias for defaultTimeoutMs
    * @param {number} [globalConfig.maxHistorySize=50] Default maximum history size
    * @param {number} [globalConfig.maxLatencyMs] Global maximum latency threshold
    */
@@ -178,10 +181,12 @@ export class EndpointMonitor extends EventEmitter {
       ? defaultInterval
       : 30000;
 
-    const defaultTimeout = Number(globalConfig.timeoutMs);
+    const rawTimeout = globalConfig.defaultTimeoutMs ?? globalConfig.timeoutMs;
+    const defaultTimeout = Number(rawTimeout);
     this.defaultTimeoutMs = Number.isFinite(defaultTimeout) && defaultTimeout > 0
       ? defaultTimeout
       : 5000;
+    this.timeoutMs = this.defaultTimeoutMs;
 
     const maxHistory = Number(globalConfig.maxHistorySize);
     this.maxHistorySize = Number.isInteger(maxHistory) && maxHistory > 0
