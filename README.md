@@ -1,189 +1,179 @@
-# Endpoint Health Checker
+# endpoint-health-checker
 
-> A lightweight, zero-dependency Node.js library for periodic API monitoring, latency tracking, and failure detection.
-
----
-
-## Overview
-
-**Endpoint Health Checker** is an in-process monitoring utility designed for Node.js backends. Instead of relying exclusively on external synthetic monitoring services or running separate infrastructure, this package runs alongside your application to periodically probe target endpoints, track response times, detect outages, and emit health status updates.
-
-> **Status:** Early development (Design & Architecture Phase). This project is in its initial setup stage and is not yet published.
+A lightweight, zero-dependency Node.js package for in-process HTTP and HTTPS endpoint monitoring, latency measurement, and health alerting.
 
 ---
 
-## Problem Statement
+## Features
 
-Modern backend services often depend on multiple external or internal APIs (payment processors, authentication providers, microservices, databases with HTTP interfaces). When one of these upstream dependencies experiences degradation or downtime:
-
-1. **Silent Failures:** The host application often discovers the failure only when an end-user triggers a request that fails.
-2. **Heavy External Tooling:** Setting up full-featured APM tools (e.g., Datadog, New Relic) or external uptime monitors can be overkill or cost-prohibitive for small services, MVPs, and internal tools.
-3. **Private Network Blindspots:** External uptime checkers cannot probe services sitting inside a private VPC or local network without custom tunnels or public access points.
-
----
-
-## Why This Package Is Useful
-
-* **Runs from the application's perspective:** Validates connectivity and latency from the exact environment where your application runs, catching network partitions and DNS issues specific to your host.
-* **Proactive failure notification:** Detects failing dependencies before users report broken workflows.
-* **Low friction:** Designed to be configured directly in code with minimal setup overhead.
-* **Event-driven:** Easily integrates with custom logging, metrics collectors, or webhook notifications via standard Node.js events.
+- **Zero Runtime Dependencies:** Relies entirely on native Node.js capabilities (`fetch`, `AbortController`, `performance.now()`, `EventEmitter`).
+- **In-Process Monitoring:** Probes services directly from your application's network context (useful for private VPCs, internal services, and microservices).
+- **Flexible Methods:** Supports `GET`, `HEAD`, and `POST` requests with configurable headers and payloads.
+- **Latency & Degraded Health Checks:** Detects high latency thresholds and flags slow responses as `DEGRADED`.
+- **Anti-Spam Event Engine:** Dispatches status transition notifications (`up`, `down`, `timeout`, `degraded`, `recovered`) while suppressing duplicate consecutive alerts.
+- **Detailed Metrics:** Tracks total checks, success/failure counts, consecutive streaks, running average latency, uptime percentage, and bounded history.
+- **Safe Execution:** Implements strict error boundaries and overlap prevention so slow or failing probes never crash host processes.
+- **Structured Reporting:** Instant JSON summaries via `exportJSON()` and `toJSON()`.
 
 ---
 
-## Target Users
+## Installation
 
-* **Node.js Backend Developers:** Engineers building services that consume third-party or internal APIs.
-* **Microservices Teams:** Teams needing internal health checks across services residing in private networks.
-* **Indie Developers & Students:** Anyone building backend projects that require dependable health monitoring without incurring infrastructure or SaaS costs.
-
----
-
-## Planned MVP Features
-
-* **Configurable Endpoint Probing:**
-  * Define endpoints by URL, HTTP method (GET, HEAD, POST), custom headers, and request timeouts.
-  * Configurable polling intervals per endpoint or globally.
-* **Success & Health Criteria:**
-  * Configurable expected HTTP status codes (e.g., `200`, ranges like `200-299`).
-  * Response time threshold checks (flagging slow responses as degraded).
-* **Metrics & Diagnostics:**
-  * Round-trip latency measurement (in milliseconds).
-  * Current status tracking (`UP`, `DOWN`, `DEGRADED`).
-  * Consecutive failure count and error messaging.
-* **Lifecycle Events:**
-  * Event emitter emitting `check`, `up`, `down`, `degraded`, and `error` events for custom handling.
-* **Clean Control Flow:**
-  * Explicit `start()` and `stop()` methods to safely manage poller timers without leaking resources.
-
----
-
-## How It Works
-
-```
-+-------------------------------------------------------------+
-|                 Your Node.js Application                    |
-|                                                             |
-|  +-------------------------------------------------------+  |
-|  |             Endpoint Health Checker                   |  |
-|  |                                                       |  |
-|  |  +------------------+         +--------------------+  |  |
-|  |  | Periodic Poller  | ------> | HTTP/S Prober      |  |  |
-|  |  +------------------+         +---------+----------+  |  |
-|  |                                         |             |  |
-|  +-----------------------------------------|-------------+  |
-|                                            |                |
-|                                            v                |
-|                              HTTP/HTTPS Requests            |
-+--------------------------------------------|----------------+
-                                             |
-                   +-------------------------+-------------------------+
-                   |                         |                         |
-                   v                         v                         v
-           [ Auth Provider ]        [ Payment Gateway ]       [ Microservice B ]
+```bash
+npm install endpoint-health-checker
 ```
 
-1. **Configuration:** You register target endpoints with custom schedules and expectations.
-2. **Scheduling:** The checker schedules periodic tasks using Node.js timers.
-3. **Probing:** On each tick, the prober sends an HTTP/HTTPS request, measures the round-trip latency, and captures the response status or connection error.
-4. **Evaluation:** The result is compared against defined success criteria (status code range and maximum allowed latency).
-5. **Reporting & Events:** Status updates and metrics are stored in memory and broadcasted via an event emitter for consumer handling.
+*Requires Node.js `>= 18.0.0`.*
 
 ---
 
-## Planned Usage Example
-
-> **Note:** The following code is an illustrative design preview of the planned API. It is not currently executable.
+## Quick Start
 
 ```javascript
-// Planned API Preview (Not yet implemented)
-import { EndpointChecker } from './src/index.js';
+import { EndpointMonitor } from 'endpoint-health-checker';
 
-const checker = new EndpointChecker({
-  defaultIntervalMs: 30000, // Check every 30 seconds
-  timeoutMs: 5000,          // 5-second request timeout
+const monitor = new EndpointMonitor({
+  defaultIntervalMs: 30000, // 30 seconds
+  timeoutMs: 5000           // 5 seconds
 });
 
-// Register endpoints to monitor
-checker.addEndpoint({
+// Register endpoints
+monitor.addEndpoint({
   id: 'payment-gateway',
   name: 'Payment Service API',
   url: 'https://api.paymentservice.example.com/health',
   method: 'GET',
   expectedStatus: 200,
-  maxAcceptableLatencyMs: 800,
+  maxLatencyMs: 800
 });
 
-checker.addEndpoint({
+monitor.addEndpoint({
   id: 'auth-service',
-  name: 'Authentication API',
-  url: 'https://auth.internal.local/v1/ping',
-  intervalMs: 15000, // Override with a custom interval
+  name: 'Internal Auth Service',
+  url: 'https://auth.internal.local/ping',
+  intervalMs: 15000,
+  auth: { bearer: 'service-token' }
 });
 
-// Listen to lifecycle events
-checker.on('down', (report) => {
-  console.error(`[ALERT] ${report.name} is DOWN! Error: ${report.error}`);
+// Listen for health transition events
+monitor.on('down', (report) => {
+  console.error(`[ALERT] ${report.name} is DOWN: ${report.error}`);
 });
 
-checker.on('degraded', (report) => {
-  console.warn(`[WARN] ${report.name} is SLOW! Latency: ${report.latencyMs}ms`);
+monitor.on('degraded', (report) => {
+  console.warn(`[WARN] ${report.name} is SLOW (${report.latencyMs}ms)`);
 });
 
-checker.on('up', (report) => {
-  console.log(`[OK] ${report.name} is healthy (${report.latencyMs}ms)`);
+monitor.on('recovered', (report) => {
+  console.log(`[RECOVERED] ${report.name} is back online!`);
 });
 
-// Start monitoring
-checker.start();
+// Start periodic checks
+monitor.start({ runImmediately: true });
 
-// Gracefully stop on shutdown
+// Graceful shutdown
 process.on('SIGTERM', () => {
-  checker.stop();
+  monitor.stop();
 });
 ```
 
 ---
 
-## Planned Technology Stack
+## Configuration Reference
 
-* **Runtime:** Node.js (`>= 18.0.0`)
-* **HTTP Client:** Native Node.js `fetch` or native `node:http` / `node:https` (keeping dependencies minimal or zero)
-* **Event Dispatch:** Built-in Node.js `node:events` (`EventEmitter`)
-* **Testing:** Node.js built-in test runner (`node:test`) or Jest / Vitest
-* **Language / Format:** Modern JavaScript (ES Modules) or TypeScript
+### Global Constructor Options (`new EndpointMonitor(options)`)
+
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `defaultIntervalMs` | `number` | `30000` | Default interval between checks in milliseconds |
+| `timeoutMs` | `number` | `5000` | Default request timeout threshold in milliseconds |
+| `maxLatencyMs` | `number` | `undefined` | Optional global threshold for `DEGRADED` status |
+| `maxHistorySize` | `number` | `50` | Maximum number of historical records to keep per endpoint |
+
+### Endpoint Options (`monitor.addEndpoint(options)`)
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `url` | `string` | *(Required)* | Target URL (`http:` or `https:`) |
+| `id` | `string` | `url` | Unique identifier for the endpoint |
+| `name` | `string` | `id` | Human-readable label for reporting |
+| `method` | `string` | `'GET'` | HTTP method (`GET`, `HEAD`, `POST`) |
+| `headers` | `object` | `{}` | Key-value dictionary of HTTP request headers |
+| `body` | `string|object` | `undefined` | Request body payload for `POST` requests |
+| `intervalMs` | `number` | `defaultIntervalMs` | Override check interval for this endpoint |
+| `timeoutMs` | `number` | `defaultTimeoutMs` | Override timeout for this endpoint |
+| `expectedStatus` | `number|number[]|string|Function` | `200-299` | Custom status criteria (e.g. `200`, `[200, 204]`, `'200-299'`, `(s) => s < 400`) |
+| `maxLatencyMs` | `number` | `undefined` | Latency ceiling in ms; marks response `DEGRADED` if exceeded |
+| `maxHistorySize` | `number` | `50` | Bound for recent check history queue |
+| `auth` | `object` | `undefined` | Auth shortcut: `{ bearer }`, `{ basic: { username, password } }`, or `{ apiKey: { header, value } }` |
+| `onUp` | `Function` | `undefined` | Callback invoked when endpoint transitions to `UP` |
+| `onDown` | `Function` | `undefined` | Callback invoked when endpoint transitions to `DOWN` |
+| `onDegraded` | `Function` | `undefined` | Callback invoked when endpoint transitions to `DEGRADED` |
+| `onRecovered` | `Function` | `undefined` | Callback invoked when endpoint recovers from failure |
 
 ---
 
-## Project Roadmap
+## Lifecycle Events
 
-* [x] **Phase 1: Concept & Documentation**
-  * Define scope, problem statement, and API design in `README.md`.
-* [ ] **Phase 2: Project Setup & Environment**
-  * Initialize `package.json` with ESM configuration, scripts, and initial tooling.
-* [ ] **Phase 3: Core Prober Implementation**
-  * Implement HTTP request dispatcher with timeout handling and latency timing.
-* [ ] **Phase 4: Scheduling & Health Evaluation Engine**
-  * Implement periodic polling engine, status computation (`UP`, `DOWN`, `DEGRADED`), and event emission.
-* [ ] **Phase 5: Automated Testing**
-  * Unit and integration test suite mocking successful responses, timeouts, and HTTP errors.
-* [ ] **Phase 6: Packaging & Documentation Polish**
-  * Finalize API references, licensing, and package metadata.
+`EndpointMonitor` extends the native Node.js `EventEmitter`. Listeners receive the status report for the affected endpoint.
+
+- **`check`**: Dispatched on every completed probe.
+- **`up`**: Dispatched when an endpoint enters `UP` status.
+- **`down`**: Dispatched when an endpoint transitions to `DOWN` (consecutive failures do not re-emit).
+- **`timeout`**: Dispatched when an endpoint request exceeds its deadline.
+- **`degraded`**: Dispatched when latency exceeds `maxLatencyMs`.
+- **`recovered`**: Dispatched when an endpoint returns to a healthy state after being down or timed out.
+- **`error`**: Dispatched if an internal scheduler or network dispatch error occurs.
 
 ---
 
-## Contribution Guidelines
+## Public Methods
 
-Contributions, suggestions, and issue reports are welcome as the project develops.
+- **`monitor.addEndpoint(config)`**: Registers an endpoint. Returns `this` for chaining.
+- **`monitor.removeEndpoint(id)`**: Deregisters an endpoint and clears its timer.
+- **`monitor.start({ runImmediately = false })`**: Starts background polling.
+- **`monitor.stop()`**: Stops all active timers.
+- **`monitor.checkNow(id?)`**: Triggers immediate check for one or all endpoints.
+- **`monitor.getStatus(id)`**: Returns current status and metrics for an endpoint.
+- **`monitor.getAllStatuses()`**: Returns status reports for all endpoints.
+- **`monitor.exportJSON(options?)`**: Returns an aggregated JSON report object or string.
+- **`monitor.toJSON()`**: Returns JSON-serializable report.
 
-1. Fork or clone the repository.
-2. Create a feature branch: `git checkout -b feature/your-feature-name`.
-3. Commit your changes with clear, descriptive messages.
-4. Ensure all tests and lint checks pass once tooling is established.
-5. Open a Pull Request describing your changes.
+---
+
+## Metrics Structure
+
+Each endpoint report contains a `metrics` block:
+
+```json
+{
+  "totalChecks": 120,
+  "successfulChecks": 118,
+  "degradedChecks": 2,
+  "failedChecks": 0,
+  "timeoutCount": 0,
+  "consecutiveSuccesses": 45,
+  "consecutiveFailures": 0,
+  "lastSuccessAt": "2026-11-22T14:30:00.000Z",
+  "lastFailureAt": null,
+  "averageLatencyMs": 42.15,
+  "uptimePercentage": 100.0,
+  "history": [ ... ]
+}
+```
+
+---
+
+## Testing
+
+Run the test suite using Node.js built-in test runner:
+
+```bash
+npm test
+```
 
 ---
 
 ## License
 
-This project is planned to be licensed under the [MIT License](LICENSE).
+MIT
