@@ -5,7 +5,7 @@ import { Scheduler } from './scheduler.js';
 import { EndpointTracker, DEFAULT_MAX_HISTORY } from './tracker.js';
 
 /**
- * Validates endpoint configuration for registration.
+ * Validates endpoint configuration for registration, applying auth and callback checks.
  * @param {Object} config
  * @returns {Object} Validated and normalized configuration
  */
@@ -24,7 +24,14 @@ function validateEndpointConfig(config) {
     timeoutMs,
     intervalMs,
     expectedStatus,
-    maxHistorySize
+    maxLatencyMs,
+    maxAcceptableLatencyMs,
+    maxHistorySize,
+    auth,
+    onUp,
+    onDown,
+    onDegraded,
+    onRecovered
   } = config;
 
   if (!url || typeof url !== 'string') {
@@ -57,6 +64,35 @@ function validateEndpointConfig(config) {
     throw new TypeError('Endpoint "headers" must be a key-value object');
   }
 
+  const normalizedHeaders = { ...headers };
+
+  // Convenience Authentication Configuration
+  if (auth !== undefined && auth !== null) {
+    if (typeof auth !== 'object') {
+      throw new TypeError('Endpoint "auth" must be an object');
+    }
+
+    if (auth.bearer) {
+      if (typeof auth.bearer !== 'string') {
+        throw new TypeError('Endpoint auth "bearer" token must be a string');
+      }
+      normalizedHeaders['Authorization'] = `Bearer ${auth.bearer}`;
+    } else if (auth.basic) {
+      if (!auth.basic.username || typeof auth.basic.username !== 'string') {
+        throw new TypeError('Endpoint auth "basic.username" must be a non-empty string');
+      }
+      const password = auth.basic.password !== undefined ? String(auth.basic.password) : '';
+      const encoded = Buffer.from(`${auth.basic.username}:${password}`).toString('base64');
+      normalizedHeaders['Authorization'] = `Basic ${encoded}`;
+    } else if (auth.apiKey) {
+      const headerName = typeof auth.apiKey.header === 'string' && auth.apiKey.header ? auth.apiKey.header : 'X-API-Key';
+      if (typeof auth.apiKey.value !== 'string') {
+        throw new TypeError('Endpoint auth "apiKey.value" must be a string');
+      }
+      normalizedHeaders[headerName] = auth.apiKey.value;
+    }
+  }
+
   let parsedTimeoutMs;
   if (timeoutMs !== undefined && timeoutMs !== null) {
     parsedTimeoutMs = Number(timeoutMs);
@@ -73,6 +109,15 @@ function validateEndpointConfig(config) {
     }
   }
 
+  const rawLatencyThreshold = maxLatencyMs ?? maxAcceptableLatencyMs;
+  let parsedMaxLatency;
+  if (rawLatencyThreshold !== undefined && rawLatencyThreshold !== null) {
+    parsedMaxLatency = Number(rawLatencyThreshold);
+    if (!Number.isFinite(parsedMaxLatency) || parsedMaxLatency <= 0) {
+      throw new RangeError('Endpoint "maxLatencyMs" must be a positive number');
+    }
+  }
+
   let parsedHistory;
   if (maxHistorySize !== undefined && maxHistorySize !== null) {
     parsedHistory = Number(maxHistorySize);
@@ -81,22 +126,41 @@ function validateEndpointConfig(config) {
     }
   }
 
+  // Validate callback hooks if provided
+  if (onUp !== undefined && typeof onUp !== 'function') {
+    throw new TypeError('Endpoint "onUp" callback must be a function');
+  }
+  if (onDown !== undefined && typeof onDown !== 'function') {
+    throw new TypeError('Endpoint "onDown" callback must be a function');
+  }
+  if (onDegraded !== undefined && typeof onDegraded !== 'function') {
+    throw new TypeError('Endpoint "onDegraded" callback must be a function');
+  }
+  if (onRecovered !== undefined && typeof onRecovered !== 'function') {
+    throw new TypeError('Endpoint "onRecovered" callback must be a function');
+  }
+
   return {
     id: endpointId,
     name: typeof name === 'string' && name.trim() ? name.trim() : endpointId,
     url: parsedUrl.toString(),
     method: normalizedMethod,
-    headers: { ...headers },
+    headers: normalizedHeaders,
     body,
     timeoutMs: parsedTimeoutMs,
     intervalMs: parsedIntervalMs,
     expectedStatus,
-    maxHistorySize: parsedHistory
+    maxLatencyMs: parsedMaxLatency,
+    maxHistorySize: parsedHistory,
+    onUp,
+    onDown,
+    onDegraded,
+    onRecovered
   };
 }
 
 /**
- * Central Monitoring Manager that coordinates the Prober, Evaluator, Scheduler, and Metrics.
+ * Central Monitoring Manager coordinating Prober, Evaluator, Scheduler, and Metrics.
  */
 export class EndpointMonitor extends EventEmitter {
   /**
@@ -104,6 +168,7 @@ export class EndpointMonitor extends EventEmitter {
    * @param {number} [globalConfig.defaultIntervalMs=30000] Default check interval in ms
    * @param {number} [globalConfig.timeoutMs=5000] Default request timeout in ms
    * @param {number} [globalConfig.maxHistorySize=50] Default maximum history size
+   * @param {number} [globalConfig.maxLatencyMs] Global maximum latency threshold
    */
   constructor(globalConfig = {}) {
     super();
@@ -122,6 +187,11 @@ export class EndpointMonitor extends EventEmitter {
     this.maxHistorySize = Number.isInteger(maxHistory) && maxHistory > 0
       ? maxHistory
       : DEFAULT_MAX_HISTORY;
+
+    const globalLatency = Number(globalConfig.maxLatencyMs ?? globalConfig.maxAcceptableLatencyMs);
+    this.defaultMaxLatencyMs = Number.isFinite(globalLatency) && globalLatency > 0
+      ? globalLatency
+      : undefined;
 
     this.endpoints = new Map();
     this.trackers = new Map();
@@ -150,19 +220,20 @@ export class EndpointMonitor extends EventEmitter {
 
     const intervalMs = validated.intervalMs || this.defaultIntervalMs;
     const timeoutMs = validated.timeoutMs || this.defaultTimeoutMs;
+    const maxLatencyMs = validated.maxLatencyMs || this.defaultMaxLatencyMs;
     const maxHistorySize = validated.maxHistorySize || this.maxHistorySize;
 
     const endpointEntry = {
       ...validated,
       intervalMs,
       timeoutMs,
+      maxLatencyMs,
       maxHistorySize
     };
 
     this.endpoints.set(id, endpointEntry);
     this.trackers.set(id, new EndpointTracker(id, { maxHistorySize }));
 
-    // Schedule task with scheduler
     this.scheduler.schedule(id, () => this.checkNow(id), intervalMs);
 
     return this;
@@ -270,6 +341,67 @@ export class EndpointMonitor extends EventEmitter {
   }
 
   /**
+   * Exports structured JSON monitoring data with summary statistics.
+   *
+   * @param {Object} [options={}]
+   * @param {boolean} [options.stringify=false] Return stringified JSON instead of object
+   * @param {number} [options.indent=2] Indentation spaces when stringified
+   * @returns {Object|string}
+   */
+  exportJSON(options = {}) {
+    const statuses = this.getAllStatuses();
+
+    const summary = {
+      totalEndpoints: statuses.length,
+      up: 0,
+      degraded: 0,
+      down: 0,
+      timeout: 0,
+      unknown: 0
+    };
+
+    for (const status of statuses) {
+      switch (status.status) {
+        case HealthStatus.UP:
+          summary.up++;
+          break;
+        case HealthStatus.DEGRADED:
+          summary.degraded++;
+          break;
+        case HealthStatus.DOWN:
+          summary.down++;
+          break;
+        case HealthStatus.TIMEOUT:
+          summary.timeout++;
+          break;
+        default:
+          summary.unknown++;
+          break;
+      }
+    }
+
+    const report = {
+      generatedAt: new Date().toISOString(),
+      summary,
+      endpoints: statuses
+    };
+
+    if (options.stringify) {
+      return JSON.stringify(report, null, options.indent ?? 2);
+    }
+
+    return report;
+  }
+
+  /**
+   * Returns a JSON-serializable snapshot of monitoring results.
+   * @returns {Object}
+   */
+  toJSON() {
+    return this.exportJSON({ stringify: false });
+  }
+
+  /**
    * Returns whether monitoring is currently active.
    *
    * @returns {boolean}
@@ -288,7 +420,7 @@ export class EndpointMonitor extends EventEmitter {
   }
 
   /**
-   * Internal worker executing probe, evaluation, metric updates, and event notifications.
+   * Internal worker executing probe, evaluation, metric updates, callbacks, and event notifications.
    * @private
    */
   async _probeAndEvaluate(id) {
@@ -308,7 +440,8 @@ export class EndpointMonitor extends EventEmitter {
     });
 
     const evalResult = evaluateHealth(probeResult, {
-      expectedStatus: endpoint.expectedStatus
+      expectedStatus: endpoint.expectedStatus,
+      maxLatencyMs: endpoint.maxLatencyMs
     });
 
     const { transitions, metrics } = tracker.recordCheck(evalResult);
@@ -334,6 +467,20 @@ export class EndpointMonitor extends EventEmitter {
       this._safeEmit(eventName, statusReport);
     }
 
+    // Safely invoke endpoint-specific callback hooks if registered
+    if (transitions.includes('up') && typeof endpoint.onUp === 'function') {
+      try { endpoint.onUp(statusReport); } catch (_) {}
+    }
+    if (transitions.includes('down') && typeof endpoint.onDown === 'function') {
+      try { endpoint.onDown(statusReport); } catch (_) {}
+    }
+    if (transitions.includes('degraded') && typeof endpoint.onDegraded === 'function') {
+      try { endpoint.onDegraded(statusReport); } catch (_) {}
+    }
+    if (transitions.includes('recovered') && typeof endpoint.onRecovered === 'function') {
+      try { endpoint.onRecovered(statusReport); } catch (_) {}
+    }
+
     return statusReport;
   }
 
@@ -346,7 +493,6 @@ export class EndpointMonitor extends EventEmitter {
     try {
       this.emit(event, ...args);
     } catch (err) {
-      // If consumer listener throws, forward to 'error' listener if attached
       if (event !== 'error' && this.listenerCount('error') > 0) {
         try {
           this.emit('error', err);

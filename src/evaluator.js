@@ -7,6 +7,7 @@ export const HealthStatus = Object.freeze({
   UP: 'UP',
   DOWN: 'DOWN',
   TIMEOUT: 'TIMEOUT',
+  DEGRADED: 'DEGRADED',
   UNKNOWN: 'UNKNOWN'
 });
 
@@ -57,8 +58,10 @@ function matchesExpectedStatus(statusCode, expected, defaultSuccess) {
  * @param {Object} probeResult Result object from prober
  * @param {Object} [options={}] Evaluation criteria options
  * @param {number|number[]|string|Function} [options.expectedStatus] Expected HTTP status
+ * @param {number} [options.maxLatencyMs] Maximum allowed latency threshold before status is DEGRADED
+ * @param {number} [options.maxAcceptableLatencyMs] Alias for maxLatencyMs
  * @returns {{
- *   status: 'UP'|'DOWN'|'TIMEOUT'|'UNKNOWN',
+ *   status: 'UP'|'DOWN'|'TIMEOUT'|'DEGRADED'|'UNKNOWN',
  *   statusCode: number|null,
  *   latencyMs: number,
  *   error: string|null,
@@ -128,6 +131,21 @@ export function evaluateHealth(probeResult, options = {}) {
   const isStatusExpected = matchesExpectedStatus(safeStatusCode, options.expectedStatus, Boolean(success));
 
   if (isStatusExpected) {
+    const rawThreshold = options.maxLatencyMs ?? options.maxAcceptableLatencyMs;
+    const maxLatency = Number(rawThreshold);
+    const hasLatencyThreshold = Number.isFinite(maxLatency) && maxLatency > 0;
+
+    if (hasLatencyThreshold && safeLatencyMs > maxLatency) {
+      return {
+        status: HealthStatus.DEGRADED,
+        statusCode: safeStatusCode,
+        latencyMs: safeLatencyMs,
+        error: `Latency threshold exceeded: ${safeLatencyMs}ms > ${maxLatency}ms`,
+        probeTimestamp: safeProbeTimestamp,
+        evaluatedAt
+      };
+    }
+
     return {
       status: HealthStatus.UP,
       statusCode: safeStatusCode,

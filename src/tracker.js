@@ -24,6 +24,7 @@ export class EndpointTracker {
 
     this.totalChecks = 0;
     this.successfulChecks = 0;
+    this.degradedChecks = 0;
     this.failedChecks = 0;
     this.timeoutCount = 0;
 
@@ -66,6 +67,11 @@ export class EndpointTracker {
       this.consecutiveSuccesses++;
       this.consecutiveFailures = 0;
       this.lastSuccessAt = timestamp;
+    } else if (evalResult.status === HealthStatus.DEGRADED) {
+      this.degradedChecks++;
+      this.consecutiveSuccesses++;
+      this.consecutiveFailures = 0;
+      this.lastSuccessAt = timestamp;
     } else {
       this.failedChecks++;
       this.consecutiveFailures++;
@@ -77,8 +83,9 @@ export class EndpointTracker {
       }
     }
 
-    // Uptime calculation based on completed checks: (successfulChecks / totalChecks) * 100
-    this.uptimePercentage = Number(((this.successfulChecks / this.totalChecks) * 100).toFixed(2));
+    // Uptime is based on completed reachable checks: (successfulChecks + degradedChecks) / totalChecks * 100
+    const reachableChecks = this.successfulChecks + this.degradedChecks;
+    this.uptimePercentage = Number(((reachableChecks / this.totalChecks) * 100).toFixed(2));
 
     // Bounded history FIFO queue
     this.history.push({
@@ -97,14 +104,19 @@ export class EndpointTracker {
     const transitions = ['check'];
 
     const wasUnhealthy = this.previousStatus === HealthStatus.DOWN || this.previousStatus === HealthStatus.TIMEOUT;
-    const isNowUp = this.currentStatus === HealthStatus.UP;
+    const isNowHealthy = this.currentStatus === HealthStatus.UP || this.currentStatus === HealthStatus.DEGRADED;
 
-    if (isNowUp) {
-      if (wasUnhealthy) {
-        transitions.push('recovered');
-      }
+    if (wasUnhealthy && isNowHealthy) {
+      transitions.push('recovered');
+    }
+
+    if (this.currentStatus === HealthStatus.UP) {
       if (this.previousStatus !== HealthStatus.UP) {
         transitions.push('up');
+      }
+    } else if (this.currentStatus === HealthStatus.DEGRADED) {
+      if (this.previousStatus !== HealthStatus.DEGRADED) {
+        transitions.push('degraded');
       }
     } else if (this.currentStatus === HealthStatus.DOWN) {
       if (this.previousStatus !== HealthStatus.DOWN) {
@@ -130,6 +142,7 @@ export class EndpointTracker {
     return {
       totalChecks: this.totalChecks,
       successfulChecks: this.successfulChecks,
+      degradedChecks: this.degradedChecks,
       failedChecks: this.failedChecks,
       timeoutCount: this.timeoutCount,
       consecutiveSuccesses: this.consecutiveSuccesses,
