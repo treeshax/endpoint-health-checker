@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { probeEndpoint } from './prober.js';
 import { evaluateHealth, HealthStatus } from './evaluator.js';
 import { Scheduler } from './scheduler.js';
+import { EndpointTracker, DEFAULT_MAX_HISTORY } from './tracker.js';
 
 /**
  * Validates endpoint configuration for registration.
@@ -13,7 +14,18 @@ function validateEndpointConfig(config) {
     throw new TypeError('Endpoint configuration must be an object');
   }
 
-  const { url, id, name, method = 'GET', headers = {}, body, timeoutMs, intervalMs, expectedStatus } = config;
+  const {
+    url,
+    id,
+    name,
+    method = 'GET',
+    headers = {},
+    body,
+    timeoutMs,
+    intervalMs,
+    expectedStatus,
+    maxHistorySize
+  } = config;
 
   if (!url || typeof url !== 'string') {
     throw new TypeError('Endpoint "url" is required and must be a string');
@@ -61,6 +73,14 @@ function validateEndpointConfig(config) {
     }
   }
 
+  let parsedHistory;
+  if (maxHistorySize !== undefined && maxHistorySize !== null) {
+    parsedHistory = Number(maxHistorySize);
+    if (!Number.isInteger(parsedHistory) || parsedHistory <= 0) {
+      throw new RangeError('Endpoint "maxHistorySize" must be a positive integer');
+    }
+  }
+
   return {
     id: endpointId,
     name: typeof name === 'string' && name.trim() ? name.trim() : endpointId,
@@ -70,18 +90,20 @@ function validateEndpointConfig(config) {
     body,
     timeoutMs: parsedTimeoutMs,
     intervalMs: parsedIntervalMs,
-    expectedStatus
+    expectedStatus,
+    maxHistorySize: parsedHistory
   };
 }
 
 /**
- * Central Monitoring Manager that coordinates the Prober, Evaluator, and Scheduler.
+ * Central Monitoring Manager that coordinates the Prober, Evaluator, Scheduler, and Metrics.
  */
 export class EndpointMonitor extends EventEmitter {
   /**
    * @param {Object} [globalConfig={}] Global defaults
    * @param {number} [globalConfig.defaultIntervalMs=30000] Default check interval in ms
    * @param {number} [globalConfig.timeoutMs=5000] Default request timeout in ms
+   * @param {number} [globalConfig.maxHistorySize=50] Default maximum history size
    */
   constructor(globalConfig = {}) {
     super();
@@ -96,15 +118,18 @@ export class EndpointMonitor extends EventEmitter {
       ? defaultTimeout
       : 5000;
 
+    const maxHistory = Number(globalConfig.maxHistorySize);
+    this.maxHistorySize = Number.isInteger(maxHistory) && maxHistory > 0
+      ? maxHistory
+      : DEFAULT_MAX_HISTORY;
+
     this.endpoints = new Map();
+    this.trackers = new Map();
     this.results = new Map();
 
     this.scheduler = new Scheduler({
       onError: (err, id) => {
-        // Emit error safely through EventEmitter if listeners exist
-        if (this.listenerCount('error') > 0) {
-          this.emit('error', err, id);
-        }
+        this._safeEmit('error', err, id);
       }
     });
   }
@@ -125,14 +150,17 @@ export class EndpointMonitor extends EventEmitter {
 
     const intervalMs = validated.intervalMs || this.defaultIntervalMs;
     const timeoutMs = validated.timeoutMs || this.defaultTimeoutMs;
+    const maxHistorySize = validated.maxHistorySize || this.maxHistorySize;
 
     const endpointEntry = {
       ...validated,
       intervalMs,
-      timeoutMs
+      timeoutMs,
+      maxHistorySize
     };
 
     this.endpoints.set(id, endpointEntry);
+    this.trackers.set(id, new EndpointTracker(id, { maxHistorySize }));
 
     // Schedule task with scheduler
     this.scheduler.schedule(id, () => this.checkNow(id), intervalMs);
@@ -153,6 +181,7 @@ export class EndpointMonitor extends EventEmitter {
 
     this.scheduler.cancel(id);
     this.endpoints.delete(id);
+    this.trackers.delete(id);
     this.results.delete(id);
     return true;
   }
@@ -190,16 +219,15 @@ export class EndpointMonitor extends EventEmitter {
       return this._probeAndEvaluate(id);
     }
 
-    // Check all registered endpoints concurrently
     const ids = Array.from(this.endpoints.keys());
     return Promise.all(ids.map((endpointId) => this._probeAndEvaluate(endpointId)));
   }
 
   /**
-   * Retrieves the latest evaluation status for a specific endpoint.
+   * Retrieves the latest evaluation status and metrics for a specific endpoint.
    *
    * @param {string} id Endpoint identifier
-   * @returns {Object|null} Status report or null if not registered
+   * @returns {Object|null} Status report with metrics or null if not registered
    */
   getStatus(id) {
     if (!id || !this.endpoints.has(id)) {
@@ -208,11 +236,15 @@ export class EndpointMonitor extends EventEmitter {
 
     const storedResult = this.results.get(id);
     if (storedResult) {
-      return { ...storedResult };
+      return {
+        ...storedResult,
+        metrics: this.trackers.get(id).getMetrics()
+      };
     }
 
-    // If registered but not checked yet, return an initial UNKNOWN status
     const endpoint = this.endpoints.get(id);
+    const tracker = this.trackers.get(id);
+
     return {
       id: endpoint.id,
       name: endpoint.name,
@@ -223,12 +255,13 @@ export class EndpointMonitor extends EventEmitter {
       latencyMs: 0,
       error: null,
       probeTimestamp: null,
-      evaluatedAt: null
+      evaluatedAt: null,
+      metrics: tracker ? tracker.getMetrics() : null
     };
   }
 
   /**
-   * Retrieves current statuses for all registered endpoints.
+   * Retrieves current statuses and metrics for all registered endpoints.
    *
    * @returns {Object[]} Array of status reports
    */
@@ -255,12 +288,14 @@ export class EndpointMonitor extends EventEmitter {
   }
 
   /**
-   * Internal worker executing the probe and health evaluation.
+   * Internal worker executing probe, evaluation, metric updates, and event notifications.
    * @private
    */
   async _probeAndEvaluate(id) {
     const endpoint = this.endpoints.get(id);
-    if (!endpoint) {
+    const tracker = this.trackers.get(id);
+
+    if (!endpoint || !tracker) {
       throw new Error(`Endpoint with id "${id}" is not registered`);
     }
 
@@ -276,6 +311,8 @@ export class EndpointMonitor extends EventEmitter {
       expectedStatus: endpoint.expectedStatus
     });
 
+    const { transitions, metrics } = tracker.recordCheck(evalResult);
+
     const statusReport = {
       id: endpoint.id,
       name: endpoint.name,
@@ -286,11 +323,38 @@ export class EndpointMonitor extends EventEmitter {
       latencyMs: evalResult.latencyMs,
       error: evalResult.error,
       probeTimestamp: evalResult.probeTimestamp,
-      evaluatedAt: evalResult.evaluatedAt
+      evaluatedAt: evalResult.evaluatedAt,
+      metrics
     };
 
     this.results.set(id, statusReport);
+
+    // Dispatch transition events safely
+    for (const eventName of transitions) {
+      this._safeEmit(eventName, statusReport);
+    }
+
     return statusReport;
+  }
+
+  /**
+   * Safe event emission helper preventing consumer callback exceptions
+   * from crashing the monitoring engine.
+   * @private
+   */
+  _safeEmit(event, ...args) {
+    try {
+      this.emit(event, ...args);
+    } catch (err) {
+      // If consumer listener throws, forward to 'error' listener if attached
+      if (event !== 'error' && this.listenerCount('error') > 0) {
+        try {
+          this.emit('error', err);
+        } catch {
+          // Prevent error handler itself from throwing
+        }
+      }
+    }
   }
 }
 
