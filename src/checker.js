@@ -3,4 +3,7 @@
  * Re-exports EndpointMonitor from monitor.js for seamless backwards compatibility.
  */
 
-export { EndpointMonitor, EndpointChecker } from './monitor.js';
+import { EndpointMonitor, EndpointChecker } from './monitor.js';
+
+export { EndpointMonitor, EndpointChecker };
+export default EndpointChecker;

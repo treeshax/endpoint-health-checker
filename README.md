@@ -339,6 +339,8 @@ monitor.start();
 - **`monitor.getAllStatuses()`**: Returns status reports for all endpoints.
 - **`monitor.exportJSON(options?)`**: Returns an aggregated JSON report object or string.
 - **`monitor.toJSON()`**: Returns JSON-serializable report.
+- **`monitor.isRunning()`**: Returns boolean indicating whether background monitoring is currently active.
+- **`monitor.getEndpointCount()`**: Returns total number of registered endpoints.
 
 ---
 
