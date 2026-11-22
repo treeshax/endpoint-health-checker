@@ -1,0 +1,30 @@
+{
+  "name": "endpoint-health-checker",
+  "version": "0.1.0",
+  "description": "A lightweight, zero-dependency Node.js library for periodic API monitoring, latency tracking, and failure detection.",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "test": "node --test test/**/*.test.js"
+  },
+  "keywords": [
+    "health-check",
+    "endpoint-monitoring",
+    "uptime",
+    "latency",
+    "status",
+    "api-monitor",
+    "zero-dependency"
+  ],
+  "author": "",
+  "license": "MIT",
+  "files": [
+    "src"
+  ]
+}
