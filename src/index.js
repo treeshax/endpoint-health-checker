@@ -3,3 +3,5 @@
  */
 
 export { EndpointChecker } from './checker.js';
+export { probeEndpoint } from './prober.js';
+export { evaluateHealth, HealthStatus } from './evaluator.js';
