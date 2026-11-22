@@ -13,6 +13,14 @@
   "scripts": {
     "test": "node --test test/**/*.test.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/treeshax/endpoint-health-checker.git"
+  },
+  "bugs": {
+    "url": "https://github.com/treeshax/endpoint-health-checker/issues"
+  },
+  "homepage": "https://github.com/treeshax/endpoint-health-checker#readme",
   "keywords": [
     "health-check",
     "endpoint-monitoring",
@@ -20,9 +28,12 @@
     "latency",
     "status",
     "api-monitor",
-    "zero-dependency"
+    "zero-dependency",
+    "microservices",
+    "http-monitor",
+    "heartbeat"
   ],
-  "author": "",
+  "author": "Harshita Jain",
   "license": "MIT",
   "files": [
     "src"
